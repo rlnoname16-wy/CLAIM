@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+from collections import deque
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -42,11 +43,22 @@ class GameRoot(BoxLayout):
         self.current_enemy: dict | None = None
         self.cooldowns = {"ability": 0}
         self.status_effects = {"burn": 0}
+        self.player_dirty = False  # Track if player needs saving
+        self.save_timer = None  # Debounce timer for saves
 
         self.shop_items = {
             "Small Potion": {"price": 20, "heal": 30},
             "Big Potion": {"price": 50, "heal": 70},
         }
+
+        # --- Build inverse lookup for boss names to biomes ---
+        self.boss_name_to_biome = {}
+        for biome, boss in claimguardians.items():
+            self.boss_name_to_biome[boss["name"]] = biome
+
+        # --- Use deque for log buffer (max 12000 chars, ~50 lines) ---
+        self.log_buffer = deque(maxlen=1000)  # Max lines
+        self.log_max_chars = 12000
 
         # --- UI: STATUS ---
         self.status = Label(text="", size_hint_y=None, height=dp(42), color=(1, 1, 1, 1))
@@ -61,9 +73,8 @@ class GameRoot(BoxLayout):
             halign="left",
             color=(1, 1, 1, 1),
         )
-        self.log_label.bind(
-            width=lambda *_: setattr(self.log_label, "text_size", (self.log_label.width, None))
-        )
+        self.log_label.text_size = (1, None)  # Pre-set to avoid rebinding
+        self.log_text_cached = ""  # Cache the full text
 
         scroll = ScrollView(size_hint=(1, 1))
         scroll.add_widget(self.log_label)
@@ -131,22 +142,46 @@ class GameRoot(BoxLayout):
         content.add_widget(btns)
         pop.open()
 
+    def queue_save(self):
+        """Mark player as dirty and schedule a debounced save."""
+        self.player_dirty = True
+        
+        # Cancel previous timer
+        if self.save_timer:
+            self.save_timer.cancel()
+        
+        # Schedule save after 2 seconds of inactivity
+        self.save_timer = Clock.schedule_once(lambda *_: self._perform_save(), 2)
+
+    def _perform_save(self):
+        """Actually save to disk if dirty."""
+        if not self.player or not self.player_dirty:
+            return
+        save_game(self.player, get_save_path())
+        self.player_dirty = False
+        self.write("💾 Game Saved!\n")
+
     def save(self):
+        """Immediate save (for critical moments)."""
         if not self.player:
             return
         save_game(self.player, get_save_path())
+        self.player_dirty = False
         self.write("💾 Game Saved!\n")
 
     # ----------------------------
     # UI helpers
     # ----------------------------
     def write(self, text: str):
-        # append and keep log size reasonable
-        current = self.log_label.text or ""
-        new_text = current + text
-        if len(new_text) > 12000:
-            new_text = new_text[-12000:]
-        self.log_label.text = new_text
+        """Append to log using buffer, keeps text size reasonable."""
+        self.log_buffer.append(text)
+        self.log_text_cached += text
+        
+        # Truncate if too large
+        if len(self.log_text_cached) > self.log_max_chars:
+            self.log_text_cached = self.log_text_cached[-self.log_max_chars:]
+        
+        self.log_label.text = self.log_text_cached
 
     def update_status(self):
         if not self.player:
@@ -264,7 +299,7 @@ class GameRoot(BoxLayout):
             self.player["health"] = min(self.player["max_health"], self.player["health"] + heal)
             self.write(f"✨ Heal +{heal}\n")
             self.update_status()
-            self.save()
+            self.queue_save()
             return
         else:
             dmg = int(self.player["attack"] * 1.5)
@@ -335,20 +370,22 @@ class GameRoot(BoxLayout):
             self.player["skill_points"] += 2
             self.write("⭐ Level Up! +2 Skill Points\n")
 
-        # Boss defeat check + loot
-        for biome, boss in claimguardians.items():
-            if boss["name"] == enemy["name"]:
-                defeated = self.player.setdefault("bosses_defeated", [])
-                if biome not in defeated:
-                    defeated.append(biome)
-                    self.write(f"🏆 Boss of {biome} defeated!\n")
-                    for item in boss.get("loot", []):
-                        self.player["inventory"].append(item)
-                        self.write(f"🎁 Loot: {item}\n")
+        # Boss defeat check + loot (now O(1) lookup!)
+        boss_name = enemy["name"]
+        if boss_name in self.boss_name_to_biome:
+            biome = self.boss_name_to_biome[boss_name]
+            defeated = self.player.setdefault("bosses_defeated", [])
+            if biome not in defeated:
+                defeated.append(biome)
+                self.write(f"🏆 Boss of {biome} defeated!\n")
+                boss = claimguardians[biome]
+                for item in boss.get("loot", []):
+                    self.player["inventory"].append(item)
+                    self.write(f"🎁 Loot: {item}\n")
 
         self.current_enemy = None
         self.update_status()
-        self.save()
+        self.queue_save()
 
     def game_over(self):
         content = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(10))
@@ -377,7 +414,7 @@ class GameRoot(BoxLayout):
         self.player["health"] = min(self.player["max_health"], self.player["health"] + 25)
         self.write("Rested +25 HP\n")
         self.update_status()
-        self.save()
+        self.queue_save()
 
     # ----------------------------
     # Inventory / Shop / Skills / Move
@@ -387,7 +424,7 @@ class GameRoot(BoxLayout):
             return
 
         content = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(10))
-        inv = list(self.player["inventory"])
+        inv = self.player["inventory"]  # No copy needed
 
         if not inv:
             content.add_widget(Label(text="(Inventory empty)"))
@@ -401,7 +438,7 @@ class GameRoot(BoxLayout):
                 self.player["health"] = min(self.player["max_health"], self.player["health"] + 30)
                 self.write(f"Used {item} (+30 HP)\n")
                 self.update_status()
-                self.save()
+                self.queue_save()
             else:
                 self.write(f"Can't use {item} right now.\n")
             pop.dismiss()
@@ -409,16 +446,23 @@ class GameRoot(BoxLayout):
         scroll = ScrollView()
         box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(6))
         box.bind(minimum_height=box.setter("height"))
+        
+        # Create buttons without reverse copy
+        buttons_items = []
         for item in inv:
             b = Button(text=item, size_hint_y=None, height=dp(48))
             box.add_widget(b)
+            buttons_items.append((b, item))
+        
         scroll.add_widget(box)
         content.add_widget(scroll)
 
         pop = Popup(title="Inventory (tap item)", content=content, size_hint=(0.9, 0.75))
-        # bind after pop exists
-        for btn, item in zip(box.children[::-1], inv):
+        
+        # Bind buttons after popup exists
+        for btn, item in buttons_items:
             btn.bind(on_release=lambda _, it=item: use(it, pop))
+        
         pop.open()
 
     def shop(self):
@@ -436,7 +480,7 @@ class GameRoot(BoxLayout):
                 self.player["inventory"].append(item)
                 self.write(f"🛒 Bought {item}\n")
                 self.update_status()
-                self.save()
+                self.queue_save()
             else:
                 self.write("❌ Not enough gold!\n")
             pop.dismiss()
@@ -475,7 +519,7 @@ class GameRoot(BoxLayout):
 
             self.player["skill_points"] -= 1
             self.write(f"⬆️ Upgraded {stat}\n")
-            self.save()
+            self.queue_save()
             refresh()
             pop.dismiss()
 
@@ -503,7 +547,7 @@ class GameRoot(BoxLayout):
             self.player["location"] = biome
             self.write(f"Moved to {biome}\n")
             self.update_status()
-            self.save()
+            self.queue_save()
             pop.dismiss()
 
         for biome in biome_names:

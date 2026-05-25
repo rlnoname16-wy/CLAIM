@@ -61,16 +61,14 @@ jobs:
           status=${PIPESTATUS[1]}
           exit $status
 
-      - name: Install Android packages (AIDL is in Build-Tools)
+      - name: Install Android packages
         shell: bash
         run: |
           set -e
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-33" \
-            "build-tools;33.0.2" \
             "ndk;25.2.9519653"
-          test -x "$ANDROID_SDK_ROOT/build-tools/33.0.2/aidl"
 
       - name: Patch buildozer.spec with SDK/NDK paths for CI
         shell: bash
@@ -87,7 +85,7 @@ jobs:
               pat = re.compile(rf"^\s*{re.escape(key)}\s*=.*$", re.M)
               if pat.search(text):
                   return pat.sub(f"{key} = {val}", text)
-              m = re.search(r"^$$buildozer$$\s*$", text, re.M)
+              m = re.search(r"^\[buildozer\]\s*$", text, re.M)
               ins = f"{key} = {val}\n"
               return text[:m.start()] + ins + text[m.start():] if m else text + "\n" + ins
 
@@ -106,8 +104,8 @@ jobs:
         shell: bash
         run: |
           set -e
-          export PATH="$ANDROID_SDK_ROOT/build-tools/33.0.2:$ANDROID_SDK_ROOT/platform-tools:$PATH"
-          aidl --version || true
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
           buildozer -v android debug
 
       - name: Collect APK(s)

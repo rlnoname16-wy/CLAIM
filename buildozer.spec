@@ -18,8 +18,11 @@ fullscreen = 0
 orientation = portrait
 android.api = 33
 android.minapi = 21
-android.ndk = 25b
+android.ndk = 25.2.9519653
 android.archs = arm64-v8a
+
+# Permissions
+android.permissions = INTERNET
 
 # (Optional) If you add an icon later, put it in this folder and set:
 # icon.filename = %(source.dir)s/icon.png
